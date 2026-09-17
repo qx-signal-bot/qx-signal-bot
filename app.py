@@ -37,9 +37,15 @@ HTML_PAGE = """
         <label>SELECT ASSET / PAIR:</label>
         <select id="symbol">
             <option value="BTCUSDT">BTC/USDT</option>
-            <option value="EURUSDT">EUR/USDT (Forex)</option>
-            <option value="GBPUSDT">GBP/USDT (Forex)</option>
             <option value="ETHUSDT">ETH/USDT</option>
+            <option value="BNBUSDT">BNB/USDT</option>
+            <option value="SOLUSDT">SOL/USDT</option>
+            <option value="XRPUSDT">XRP/USDT</option>
+            <option value="ADAUSDT">ADA/USDT</option>
+            <option value="DOGEUSDT">DOGE/USDT</option>
+            <option value="AVAXUSDT">AVAX/USDT</option>
+            <option value="DOTUSDT">DOT/USDT</option>
+            <option value="LINKUSDT">LINK/USDT</option>
         </select>
 
         <label>REQUIRED POWERFUL SIGNALS COUNT:</label>
@@ -84,7 +90,7 @@ HTML_PAGE = """
                         const colorClass = isCall ? "CALL" : "PUT";
                         const textClass = isCall ? "CALL-text" : "PUT-text";
                         
-                        fullText += `${s.time}: ${s.direction} (${s.confidence}) [Confluence: ${s.confluence}]\n`;
+                        fullText += `${s.time}: ${s.direction} (${s.confidence}) [Confluence: ${s.confluence}]\\n`;
                         
                         resDiv.innerHTML += `
                             <div class="sig-box ${colorClass}">
@@ -114,9 +120,12 @@ HTML_PAGE = """
 
 def fetch_klines(symbol="BTCUSDT", interval="1m", limit=100):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    res = requests.get(url, timeout=5)
+    res = requests.get(url, timeout=15)
     data = res.json()
     
+    if not isinstance(data, list) or len(data) == 0:
+        raise ValueError("Invalid Asset Data Received")
+
     closes = [float(k[4]) for k in data]
     highs = [float(k[2]) for k in data]
     lows = [float(k[3]) for k in data]
@@ -183,15 +192,12 @@ def analyze_market(opens, highs, lows, closes):
     call_score = 0
     put_score = 0
 
-    # 1. RSI Rules (7)
     if rsi < 30: call_score += 2
     elif rsi > 70: put_score += 2
 
-    # 2. CCI Rules (20)
     if cci < -100: call_score += 1.5
     elif cci > 100: put_score += 1.5
 
-    # 3. Bollinger Bands Rules (2.5 StdDev)
     bb_status = "NORMAL"
     if c_close <= bb_lower:
         call_score += 2
@@ -200,13 +206,11 @@ def analyze_market(opens, highs, lows, closes):
         put_score += 2
         bb_status = "OVERBOUGHT (UPPER BAND)"
 
-    # 4. Stochastic Rules
     if stoch_k < 20: call_score += 1.5
     elif stoch_k > 80: put_score += 1.5
 
-    # 5. Price Action & Shadow Rejection
     if lower_shade > (1.5 * body): call_score += 1
-    if upper_shade > (1.5 * body): put_score += 1
+    if upper_shade > (1.5 * body): call_score += 1
 
     trend = "BULLISH" if c_close > bb_middle else "BEARISH"
 
@@ -236,9 +240,7 @@ def get_signals():
         signals = []
         scanned_minute = 1
         
-        # কেবল মাল্টি-ইন্ডিকেটর কনফার্মড সিগন্যাল ফিল্টার করা
         while len(signals) < required_count and scanned_minute <= 30:
-            # সিমুলেটেড টাইম-স্কিপ লজিক (প্রকৃত ফিল্টারড সিগন্যাল নির্বাচন)
             score_call = analysis['call_score']
             score_put = analysis['put_score']
             
@@ -249,7 +251,7 @@ def get_signals():
                     "confidence": f"{min(95, int(75 + score_call * 4))}%",
                     "confluence": f"{round(score_call, 1)}/8 Indicators Matched"
                 })
-                scanned_minute += 2 # পরবর্তী শক্তিশালী ক্যান্ডেলের জন্য স্কিপ
+                scanned_minute += 2
             elif score_put >= 4.0:
                 signals.append({
                     "time": f"+{scanned_minute} min candle",
@@ -269,8 +271,10 @@ def get_signals():
         })
 
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({"status": "error", "message": f"Asset Data Error: {str(e)}"}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    import os
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
     
