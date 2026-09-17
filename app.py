@@ -7,9 +7,17 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-# Only real Binance spot pairs. EURUSDT / GBPUSDT don't exist on Binance and
-# will 400 on every request, which was silently producing the empty-result bug.
-VALID_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+# Binance's API blocks requests from many cloud-hosting IP ranges (including
+# Render's default US region) for regulatory reasons — that's why the previous
+# version returned "Could not reach Binance API" when deployed, even though it
+# worked fine when tested locally. Kraken's public API has no such block and
+# needs no API key, so we use it as the live data source instead.
+KRAKEN_PAIR_MAP = {
+    "BTCUSDT": "XBTUSD",
+    "ETHUSDT": "ETHUSD",
+    "SOLUSDT": "SOLUSD",
+}
+VALID_SYMBOLS = list(KRAKEN_PAIR_MAP.keys())
 
 HTML_PAGE = """
 <!DOCTYPE html>
@@ -105,22 +113,35 @@ HTML_PAGE = """
 
 def fetch_klines_safe(symbol="BTCUSDT"):
     if symbol not in VALID_SYMBOLS:
-        raise ValueError(f"'{symbol}' is not a supported Binance pair. Choose one of {VALID_SYMBOLS}.")
+        raise ValueError(f"'{symbol}' is not supported. Choose one of {VALID_SYMBOLS}.")
 
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&limit=100"
+    kraken_pair = KRAKEN_PAIR_MAP[symbol]
+    url = f"https://api.kraken.com/0/public/OHLC?pair={kraken_pair}&interval=1"
     res = requests.get(url, timeout=10)
     res.raise_for_status()
     data = res.json()
 
-    if not isinstance(data, list) or len(data) == 0:
+    if data.get("error"):
+        raise ValueError(f"Kraken API error: {data['error']}")
+
+    result = data.get("result", {})
+    # The result dict has one candle-array key (Kraken's internal pair name,
+    # e.g. "XXBTZUSD") plus a "last" timestamp key — grab the candle array.
+    candle_key = next((k for k in result.keys() if k != "last"), None)
+    if candle_key is None:
+        raise ValueError(f"Unexpected Kraken response shape for {symbol}")
+
+    candles = result[candle_key][-100:]
+    if len(candles) == 0:
         raise ValueError(f"Market data unavailable for {symbol}")
 
     opens, highs, lows, closes = [], [], [], []
-    for item in data:
-        opens.append(float(item[1]))
-        highs.append(float(item[2]))
-        lows.append(float(item[3]))
-        closes.append(float(item[4]))
+    for c in candles:
+        # Kraken OHLC row: [time, open, high, low, close, vwap, volume, count]
+        opens.append(float(c[1]))
+        highs.append(float(c[2]))
+        lows.append(float(c[3]))
+        closes.append(float(c[4]))
 
     return opens, highs, lows, closes
 
@@ -257,7 +278,7 @@ def get_signals():
     except ValueError as e:
         return jsonify({"status": "error", "message": str(e)}), 400
     except requests.RequestException:
-        return jsonify({"status": "error", "message": "Could not reach Binance API."}), 502
+        return jsonify({"status": "error", "message": "Could not reach Kraken API."}), 502
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 
