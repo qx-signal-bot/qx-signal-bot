@@ -7,17 +7,33 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
-# Binance's API blocks requests from many cloud-hosting IP ranges (including
-# Render's default US region) for regulatory reasons — that's why the previous
-# version returned "Could not reach Binance API" when deployed, even though it
-# worked fine when tested locally. Kraken's public API has no such block and
-# needs no API key, so we use it as the live data source instead.
+# --- Crypto: Kraken (no key needed, works 24/7, no geo-block issues) ---
 KRAKEN_PAIR_MAP = {
     "BTCUSDT": "XBTUSD",
     "ETHUSDT": "ETHUSD",
     "SOLUSDT": "SOLUSD",
 }
-VALID_SYMBOLS = list(KRAKEN_PAIR_MAP.keys())
+
+# --- Real forex majors: Twelve Data (needs a free API key) ---
+# These are REAL interbank forex prices, only available during real forex
+# market hours (closed weekends). They are NOT the same feed as Quotex's
+# OTC pairs, which are Quotex's own synthetic price generator and run 24/7.
+# Set TWELVE_DATA_API_KEY as an environment variable on Render to enable these.
+TWELVE_DATA_PAIR_MAP = {
+    "EURUSD": "EUR/USD",
+    "GBPUSD": "GBP/USD",
+    "USDJPY": "USD/JPY",
+    "AUDUSD": "AUD/USD",
+}
+TWELVE_DATA_API_KEY = os.environ.get("12d2d70a4eb6478593ea733dce4beeb4", "")
+
+ASSET_TYPE = {}
+for _s in KRAKEN_PAIR_MAP:
+    ASSET_TYPE[_s] = "crypto"
+for _s in TWELVE_DATA_PAIR_MAP:
+    ASSET_TYPE[_s] = "forex"
+
+VALID_SYMBOLS = list(ASSET_TYPE.keys())
 
 HTML_PAGE = """
 <!DOCTYPE html>
@@ -64,10 +80,22 @@ HTML_PAGE = """
 
         <label>SELECT MARKET ASSET:</label>
         <select id="symbol" onchange="onSymbolChange()">
-            <option value="BTCUSDT">BTC/USDT</option>
-            <option value="ETHUSDT">ETH/USDT</option>
-            <option value="SOLUSDT">SOL/USDT</option>
+            <optgroup label="Crypto (24/7)">
+                <option value="BTCUSDT">BTC/USDT</option>
+                <option value="ETHUSDT">ETH/USDT</option>
+                <option value="SOLUSDT">SOL/USDT</option>
+            </optgroup>
+            <optgroup label="Real forex majors (market hours only)">
+                <option value="EURUSD">EUR/USD</option>
+                <option value="GBPUSD">GBP/USD</option>
+                <option value="USDJPY">USD/JPY</option>
+                <option value="AUDUSD">AUD/USD</option>
+            </optgroup>
         </select>
+        <div class="status-line" style="margin-top:-2px;">
+            Forex pairs are real interbank data — different from Quotex's OTC feed,
+            and only return data while the real forex market is open (closed weekends).
+        </div>
 
         <div class="toggle-row">
             <label style="margin:0;">Auto-refresh every 60s (M1 timeframe)</label>
@@ -293,10 +321,7 @@ HTML_PAGE = """
 """
 
 
-def fetch_klines_safe(symbol="BTCUSDT"):
-    if symbol not in VALID_SYMBOLS:
-        raise ValueError(f"'{symbol}' is not supported. Choose one of {VALID_SYMBOLS}.")
-
+def fetch_klines_kraken(symbol):
     kraken_pair = KRAKEN_PAIR_MAP[symbol]
     url = f"https://api.kraken.com/0/public/OHLC?pair={kraken_pair}&interval=1"
     res = requests.get(url, timeout=10)
@@ -307,8 +332,6 @@ def fetch_klines_safe(symbol="BTCUSDT"):
         raise ValueError(f"Kraken API error: {data['error']}")
 
     result = data.get("result", {})
-    # The result dict has one candle-array key (Kraken's internal pair name,
-    # e.g. "XXBTZUSD") plus a "last" timestamp key — grab the candle array.
     candle_key = next((k for k in result.keys() if k != "last"), None)
     if candle_key is None:
         raise ValueError(f"Unexpected Kraken response shape for {symbol}")
@@ -326,6 +349,52 @@ def fetch_klines_safe(symbol="BTCUSDT"):
         closes.append(float(c[4]))
 
     return opens, highs, lows, closes
+
+
+def fetch_klines_twelvedata(symbol):
+    if not TWELVE_DATA_API_KEY:
+        raise ValueError(
+            "Forex data needs a Twelve Data API key. Set TWELVE_DATA_API_KEY "
+            "in Render's Environment tab (free key at twelvedata.com)."
+        )
+
+    td_symbol = TWELVE_DATA_PAIR_MAP[symbol]
+    url = (
+        "https://api.twelvedata.com/time_series"
+        f"?symbol={td_symbol}&interval=1min&outputsize=100&apikey={TWELVE_DATA_API_KEY}"
+    )
+    res = requests.get(url, timeout=10)
+    res.raise_for_status()
+    data = res.json()
+
+    if data.get("status") == "error" or "values" not in data:
+        msg = data.get("message", "Unknown Twelve Data error")
+        raise ValueError(
+            f"Twelve Data error for {symbol}: {msg}. "
+            "Note: real forex markets are closed on weekends — this pair "
+            "will only return data during real market hours."
+        )
+
+    values = list(reversed(data["values"]))  # API returns newest-first; we need oldest-first
+    if len(values) == 0:
+        raise ValueError(f"No forex candles returned for {symbol} (market may be closed).")
+
+    opens = [float(v["open"]) for v in values]
+    highs = [float(v["high"]) for v in values]
+    lows = [float(v["low"]) for v in values]
+    closes = [float(v["close"]) for v in values]
+
+    return opens, highs, lows, closes
+
+
+def fetch_klines_safe(symbol="BTCUSDT"):
+    if symbol not in VALID_SYMBOLS:
+        raise ValueError(f"'{symbol}' is not supported. Choose one of {VALID_SYMBOLS}.")
+
+    if ASSET_TYPE[symbol] == "crypto":
+        return fetch_klines_kraken(symbol)
+    else:
+        return fetch_klines_twelvedata(symbol)
 
 
 def calculate_ema(closes, period):
@@ -372,99 +441,4 @@ def analyze_strict_confluence(opens, highs, lows, closes):
     bb_upper, bb_lower, bb_middle = calculate_bollinger(closes, 20, 2.0)
     stoch_k = calculate_stochastic(highs, lows, closes, 14)
 
-    c_open, c_close, c_high, c_low = opens[-1], closes[-1], highs[-1], lows[-1]
-    body = abs(c_close - c_open)
-    lower_shade = min(c_open, c_close) - c_low
-    upper_shade = c_high - max(c_open, c_close)
-
-    call_filters = 0.0
-    put_filters = 0.0
-
-    if c_close > ema20 and ema20 > ema50:
-        call_filters += 1
-    elif c_close < ema20 and ema20 < ema50:
-        put_filters += 1
-
-    if rsi <= 35:
-        call_filters += 1.5
-    elif rsi >= 65:
-        put_filters += 1.5
-
-    bb_status = "MIDDLE ZONE"
-    if c_close <= bb_lower or c_low <= bb_lower:
-        call_filters += 1.5
-        bb_status = "OVERSOLD (LOWER BAND)"
-    elif c_close >= bb_upper or c_high >= bb_upper:
-        put_filters += 1.5
-        bb_status = "OVERBOUGHT (UPPER BAND)"
-
-    if stoch_k < 25:
-        call_filters += 1
-    elif stoch_k > 75:
-        put_filters += 1
-
-    if lower_shade > (1.8 * body) and lower_shade > 0:
-        call_filters += 1
-    if upper_shade > (1.8 * body) and upper_shade > 0:
-        put_filters += 1
-
-    ema_trend = "BULLISH" if ema20 > ema50 else "BEARISH"
-
-    return {
-        "call_score": round(call_filters, 1),
-        "put_score": round(put_filters, 1),
-        "rsi": rsi,
-        "stoch": stoch_k,
-        "bb_status": bb_status,
-        "ema_trend": ema_trend,
-    }
-
-
-@app.route('/')
-def home():
-    return render_template_string(HTML_PAGE)
-
-
-@app.route('/api/signals', methods=['GET'])
-def get_signals():
-    symbol = request.args.get('symbol', 'BTCUSDT')
-
-    try:
-        opens, highs, lows, closes = fetch_klines_safe(symbol)
-        analysis = analyze_strict_confluence(opens, highs, lows, closes)
-
-        # One honest read of the current, already-closed candle. We do NOT
-        # fabricate a series of future-minute signals from a single snapshot —
-        # that would require re-fetching live data at each future timestamp,
-        # which this synchronous request can't actually do.
-        threshold = 4.0
-        if analysis['call_score'] >= threshold:
-            direction = "CALL"
-        elif analysis['put_score'] >= threshold:
-            direction = "PUT"
-        else:
-            direction = "NONE"
-
-        return jsonify({
-            "status": "success",
-            "symbol": symbol,
-            "last_close": closes[-1],
-            "analysis": analysis,
-            "signal": {
-                "direction": direction,
-                "call_score": analysis['call_score'],
-                "put_score": analysis['put_score'],
-            },
-        })
-
-    except ValueError as e:
-        return jsonify({"status": "error", "message": str(e)}), 400
-    except requests.RequestException:
-        return jsonify({"status": "error", "message": "Could not reach Kraken API."}), 502
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+    c_open, c_close, c_high
