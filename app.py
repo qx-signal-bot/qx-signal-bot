@@ -25,7 +25,7 @@ TWELVE_DATA_PAIR_MAP = {
     "USDJPY": "USD/JPY",
     "AUDUSD": "AUD/USD",
 }
-TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY", "")
+TWELVE_DATA_API_KEY = os.environ.get("12d2d70a4eb6478593ea733dce4beeb4", "")
 
 ASSET_TYPE = {}
 for _s in KRAKEN_PAIR_MAP:
