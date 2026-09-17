@@ -29,11 +29,14 @@ HTML_PAGE = """
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #0b0f19; color: #f8fafc; padding: 15px; margin: 0; }
         .card { background: #151c2c; border-radius: 14px; padding: 20px; max-width: 500px; margin: auto; box-shadow: 0 8px 25px rgba(0,0,0,0.6); border: 1px solid #1e293b; }
-        h2 { text-align: center; color: #38bdf8; font-size: 20px; margin-top: 0; }
+        h2 { text-align: center; color: #38bdf8; font-size: 19px; margin-top: 0; }
         label { font-size: 13px; color: #94a3b8; font-weight: 600; display: block; margin-top: 10px; }
         select, button { width: 100%; padding: 12px; margin-top: 6px; margin-bottom: 12px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #fff; font-size: 14px; outline: none; }
         button { background: #0284c7; color: white; font-weight: bold; border: none; cursor: pointer; transition: 0.2s; }
         button:hover { background: #0369a1; }
+        button:disabled { opacity: 0.6; cursor: not-allowed; }
+        .toggle-row { display: flex; align-items: center; justify-content: space-between; margin: 10px 0; }
+        .toggle-row label { margin: 0; }
         .stats { background: #0f172a; padding: 12px; border-radius: 8px; margin-bottom: 15px; font-size: 12px; border-left: 4px solid #38bdf8; line-height: 1.6; }
         .sig-box { background: #1e293b; padding: 12px; border-radius: 8px; margin-bottom: 10px; border-left: 4px solid #64748b; }
         .sig-box.CALL { border-left-color: #22c55e; }
@@ -41,48 +44,154 @@ HTML_PAGE = """
         .sig-box.NONE { border-left-color: #64748b; }
         .CALL-text { color: #22c55e; font-weight: bold; }
         .PUT-text { color: #ef4444; font-weight: bold; }
+        .track-record { background: #0f172a; border: 1px solid #1e293b; border-radius: 8px; padding: 12px; margin-bottom: 15px; }
+        .track-record h3 { font-size: 13px; color: #94a3b8; margin: 0 0 8px; font-weight: 600; }
+        .tr-stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; text-align: center; }
+        .tr-stat .num { font-size: 18px; font-weight: 700; }
+        .tr-stat .lbl { font-size: 10px; color: #64748b; margin-top: 2px; }
+        .tr-win { color: #22c55e; } .tr-loss { color: #ef4444; } .tr-neutral { color: #94a3b8; }
+        table.log { width: 100%; border-collapse: collapse; font-size: 11px; margin-top: 10px; }
+        table.log th, table.log td { text-align: left; padding: 5px 3px; border-bottom: 1px solid #1e293b; }
+        table.log th { color: #64748b; font-weight: 500; }
+        .reset-btn { background: #334155; font-size: 12px; padding: 8px; margin-top: 4px; }
         .warn { font-size: 11px; color: #fbbf24; margin-top: 14px; line-height: 1.5; border-top: 1px solid #1e293b; padding-top: 10px; }
+        .status-line { font-size: 11px; color: #64748b; text-align: center; margin: -6px 0 10px; }
     </style>
 </head>
 <body>
     <div class="card">
-        <h2>📊 QX Multi-Indicator Read (current moment only)</h2>
+        <h2>📊 QX Multi-Indicator Read — Live Track Record</h2>
 
         <label>SELECT MARKET ASSET:</label>
-        <select id="symbol">
+        <select id="symbol" onchange="onSymbolChange()">
             <option value="BTCUSDT">BTC/USDT</option>
             <option value="ETHUSDT">ETH/USDT</option>
             <option value="SOLUSDT">SOL/USDT</option>
         </select>
 
-        <button onclick="getSignal()">⚡ READ CURRENT CONFLUENCE</button>
+        <div class="toggle-row">
+            <label style="margin:0;">Auto-refresh every 60s (M1 timeframe)</label>
+            <input type="checkbox" id="autoRefresh" onchange="toggleAutoRefresh()" style="width:auto; margin:0;">
+        </div>
+
+        <button onclick="getSignal()" id="manualBtn">⚡ READ CURRENT CONFLUENCE</button>
+        <div class="status-line" id="nextRefreshLine"></div>
+
+        <div class="track-record">
+            <h3>Honest track record (this browser, this asset only)</h3>
+            <div class="tr-stat-grid">
+                <div class="tr-stat"><div class="num tr-neutral" id="trTotal">0</div><div class="lbl">Resolved</div></div>
+                <div class="tr-stat"><div class="num tr-win" id="trWins">0</div><div class="lbl">Correct</div></div>
+                <div class="tr-stat"><div class="num" id="trRate">—</div><div class="lbl">Win rate</div></div>
+            </div>
+            <button class="reset-btn" onclick="resetTrackRecord()">Reset track record for this asset</button>
+        </div>
 
         <div id="statsBox" class="stats" style="display:none;"></div>
         <div id="results"></div>
 
+        <table class="log" id="logTable" style="display:none;">
+            <thead><tr><th>Time</th><th>Signal</th><th>Score</th><th>Outcome</th></tr></thead>
+            <tbody id="logBody"></tbody>
+        </table>
+
         <div class="warn">
-            This reads indicators for the candle that has already closed. It is a
-            snapshot of current conditions, not a verified prediction of the next
-            candle. Confluence score is real math; it has not been backtested for
-            accuracy on this data. Treat any single reading as informational, not
-            as a trade instruction.
+            Every row here is a real, timestamped reading against live Kraken data —
+            not a fabricated list of future minutes. "Outcome" is filled in only once
+            the next real candle actually closes, by comparing the new price to the
+            price at signal time. Nothing here is guaranteed; this is a track record
+            you build and judge for yourself, not a promise of accuracy.
         </div>
     </div>
 
     <script>
+        let refreshTimer = null;
+        let pendingSignal = null; // {direction, close, symbol, time}
+
+        function storageKey(symbol) { return `qx_track_${symbol}`; }
+
+        function loadHistory(symbol) {
+            try {
+                const raw = localStorage.getItem(storageKey(symbol));
+                return raw ? JSON.parse(raw) : [];
+            } catch (e) { return []; }
+        }
+
+        function saveHistory(symbol, history) {
+            try { localStorage.setItem(storageKey(symbol), JSON.stringify(history)); } catch (e) {}
+        }
+
+        function resetTrackRecord() {
+            const symbol = document.getElementById('symbol').value;
+            localStorage.removeItem(storageKey(symbol));
+            pendingSignal = null;
+            renderTrackRecord(symbol);
+        }
+
+        function onSymbolChange() {
+            pendingSignal = null;
+            const symbol = document.getElementById('symbol').value;
+            renderTrackRecord(symbol);
+            document.getElementById('results').innerHTML = '';
+            document.getElementById('statsBox').style.display = 'none';
+        }
+
+        function renderTrackRecord(symbol) {
+            const history = loadHistory(symbol).filter(h => h.resolved);
+            const total = history.length;
+            const wins = history.filter(h => h.won).length;
+            document.getElementById('trTotal').textContent = total;
+            document.getElementById('trWins').textContent = wins;
+            document.getElementById('trRate').textContent = total > 0 ? ((wins / total) * 100).toFixed(1) + '%' : '—';
+
+            const logBody = document.getElementById('logBody');
+            const logTable = document.getElementById('logTable');
+            if (total === 0) { logTable.style.display = 'none'; return; }
+            logTable.style.display = 'table';
+            logBody.innerHTML = '';
+            history.slice(-15).reverse().forEach(h => {
+                const tr = document.createElement('tr');
+                const outcomeColor = h.won ? '#22c55e' : '#ef4444';
+                tr.innerHTML = `<td>${h.timeLabel}</td><td>${h.direction}</td><td>${h.call_score}/${h.put_score}</td>` +
+                                `<td style="color:${outcomeColor}">${h.won ? 'WIN' : 'LOSS'}</td>`;
+                logBody.appendChild(tr);
+            });
+        }
+
+        function resolvePending(symbol, newClose) {
+            if (!pendingSignal || pendingSignal.symbol !== symbol) return;
+            if (pendingSignal.direction === 'NONE') { pendingSignal = null; return; }
+
+            const won = pendingSignal.direction === 'CALL'
+                ? newClose > pendingSignal.close
+                : newClose < pendingSignal.close;
+
+            const history = loadHistory(symbol);
+            history.push({
+                timeLabel: pendingSignal.timeLabel,
+                direction: pendingSignal.direction,
+                call_score: pendingSignal.call_score,
+                put_score: pendingSignal.put_score,
+                resolved: true,
+                won: won,
+            });
+            saveHistory(symbol, history.slice(-200));
+            pendingSignal = null;
+        }
+
         async function getSignal() {
             const symbol = document.getElementById('symbol').value;
             const resDiv = document.getElementById('results');
             const statsDiv = document.getElementById('statsBox');
-
-            resDiv.innerHTML = "<p style='text-align:center; color:#94a3b8;'>Fetching live candles...</p>";
-            statsDiv.style.display = "none";
 
             try {
                 const res = await fetch(`/api/signals?symbol=${symbol}`);
                 const data = await res.json();
 
                 if (data.status === "success") {
+                    // Resolve whatever signal was pending from the previous read.
+                    resolvePending(symbol, data.last_close);
+
                     const ans = data.analysis;
                     statsDiv.style.display = "block";
                     statsDiv.innerHTML = `<b>Asset:</b> ${data.symbol} &middot; <b>Last close:</b> ${data.last_close}<br>` +
@@ -92,12 +201,27 @@ HTML_PAGE = """
                     const s = data.signal;
                     const colorClass = s.direction === "CALL" ? "CALL" : (s.direction === "PUT" ? "PUT" : "NONE");
                     const textClass = s.direction === "CALL" ? "CALL-text" : (s.direction === "PUT" ? "PUT-text" : "");
+                    const now = new Date();
+                    const timeLabel = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
                     resDiv.innerHTML = `
                         <div class="sig-box ${colorClass}">
-                            <span class="${textClass}">${s.direction === "NONE" ? "No confluence reached" : s.direction}</span><br>
+                            <span class="${textClass}">${s.direction === "NONE" ? "No confluence reached" : s.direction}</span>
+                            <small style="color:#64748b;"> &middot; read at ${timeLabel}</small><br>
                             <small style="color:#cbd5e1;">Confluence score — CALL: ${s.call_score}/6, PUT: ${s.put_score}/6</small>
                         </div>`;
+
+                    // Queue this reading to be resolved on the NEXT real fetch.
+                    pendingSignal = {
+                        symbol: symbol,
+                        direction: s.direction,
+                        close: data.last_close,
+                        call_score: s.call_score,
+                        put_score: s.put_score,
+                        timeLabel: timeLabel,
+                    };
+
+                    renderTrackRecord(symbol);
                 } else {
                     resDiv.innerHTML = `<p style='color:#ef4444; text-align:center;'>${data.message}</p>`;
                 }
@@ -105,6 +229,31 @@ HTML_PAGE = """
                 resDiv.innerHTML = "<p style='color:#ef4444; text-align:center;'>Server connection error.</p>";
             }
         }
+
+        function toggleAutoRefresh() {
+            const on = document.getElementById('autoRefresh').checked;
+            const manualBtn = document.getElementById('manualBtn');
+            if (on) {
+                manualBtn.disabled = true;
+                getSignal();
+                let secondsLeft = 60;
+                const lineEl = document.getElementById('nextRefreshLine');
+                refreshTimer = setInterval(() => {
+                    secondsLeft--;
+                    lineEl.textContent = secondsLeft > 0 ? `Next real fetch in ${secondsLeft}s` : 'Fetching...';
+                    if (secondsLeft <= 0) {
+                        secondsLeft = 60;
+                        getSignal();
+                    }
+                }, 1000);
+            } else {
+                manualBtn.disabled = false;
+                clearInterval(refreshTimer);
+                document.getElementById('nextRefreshLine').textContent = '';
+            }
+        }
+
+        renderTrackRecord(document.getElementById('symbol').value);
     </script>
 </body>
 </html>
@@ -286,4 +435,4 @@ def get_signals():
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
-    
+            
