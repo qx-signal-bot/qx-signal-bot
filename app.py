@@ -36,15 +36,13 @@ HTML_PAGE = """
     <div class="card">
         <h2>📊 QX Strict Multi-Indicator Filter</h2>
         
-        <label>SELECT QUOTEX ASSET / MARKET:</label>
+        <label>SELECT MARKET ASSET:</label>
         <select id="symbol">
-            <option value="EURUSD_otc">EUR/USD (OTC)</option>
-            <option value="GBPUSD_otc">GBP/USD (OTC)</option>
-            <option value="USDBDT_otc">USD/BDT (OTC)</option>
-            <option value="USDINR_otc">USD/INR (OTC)</option>
-            <option value="EURUSD">EUR/USD (Real Market)</option>
-            <option value="GBPUSD">GBP/USD (Real Market)</option>
-            <option value="BTCUSD">BTC/USD (Crypto)</option>
+            <option value="BTCUSDT">BTC/USDT (Crypto)</option>
+            <option value="ETHUSDT">ETH/USDT (Crypto)</option>
+            <option value="SOLUSDT">SOL/USDT (Crypto)</option>
+            <option value="EURUSDT">EUR/USDT (Forex Proxy)</option>
+            <option value="GBPUSDT">GBP/USDT (Forex Proxy)</option>
         </select>
 
         <label>POWERFUL SURESHOT SIGNALS COUNT:</label>
@@ -67,7 +65,7 @@ HTML_PAGE = """
             const resDiv = document.getElementById('results');
             const statsDiv = document.getElementById('statsBox');
             
-            resDiv.innerHTML = "<p style='text-align:center; color:#94a3b8;'>Analyzing QX Live Stream with 6 Indicators (Filtering Bad Candles)...</p>";
+            resDiv.innerHTML = "<p style='text-align:center; color:#94a3b8;'>Scanning Live Stream with 6 Indicators...</p>";
             statsDiv.style.display = "none";
 
             try {
@@ -82,7 +80,7 @@ HTML_PAGE = """
                                          `<b>Stoch K:</b> ${ans.stoch} | <b>BB Zone:</b> ${ans.bb_status}`;
 
                     resDiv.innerHTML = "";
-                    let fullText = `--- QUOTEX ${data.symbol} HIGH CONFLUENCE SIGNALS ---\\n`;
+                    let fullText = `--- ${data.symbol} SURESHOT SIGNALS ---\\n`;
 
                     data.signals.forEach(s => {
                         const isCall = s.direction.includes("CALL");
@@ -117,37 +115,28 @@ HTML_PAGE = """
 </html>
 """
 
-def fetch_quotex_klines(symbol="EURUSD_otc"):
-    # Quotex REST Fallback Generator using Cryptocompare/Binance bridge for accurate real-time stream
-    clean_sym = symbol.replace("_otc", "").upper()
-    if clean_sym in ["EURUSD", "GBPUSD", "USDBDT", "USDINR"]:
-        url = f"https://min-api.cryptocompare.com/data/v2/histo-minute?fsym={clean_sym[:3]}&tsym={clean_sym[3:]}&limit=120"
-    else:
-        clean_sym = "BTCUSDT" if clean_sym == "BTCUSD" else clean_sym
-        url = f"https://api.binance.com/api/v3/klines?symbol={clean_sym}&interval=1m&limit=120"
-
-    res = requests.get(url, timeout=12)
+def fetch_klines_safe(symbol="BTCUSDT"):
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&limit=100"
+    res = requests.get(url, timeout=10)
     data = res.json()
 
-    if "Data" in data and "Data" in data["Data"]:
-        klines = data["Data"]["Data"]
-        closes = [float(k["close"]) for k in klines]
-        highs = [float(k["high"]) for k in klines]
-        lows = [float(k["low"]) for k in klines]
-        opens = [float(k["open"]) for k in klines]
-    else:
-        closes = [float(k[4]) for k in data]
-        highs = [float(k[2]) for k in data]
-        lows = [float(k[3]) for k in data]
-        opens = [float(k[1]) for k in data]
+    if not isinstance(data, list) or len(data) == 0:
+        raise ValueError(f"Market Data Unavailable for {symbol}")
+
+    opens, highs, lows, closes = [], [], [], []
+    for item in data:
+        opens.append(float(item[1]))
+        highs.append(float(item[2]))
+        lows.append(float(item[3]))
+        closes.append(float(item[4]))
 
     return opens, highs, lows, closes
 
 def calculate_ema(closes, period):
-    multiplier = 2 / (period + 1)
+    mult = 2 / (period + 1)
     ema = [closes[0]]
-    for price in closes[1:]:
-        ema.append((price - ema[-1]) * multiplier + ema[-1])
+    for p in closes[1:]:
+        ema.append((p - ema[-1]) * mult + ema[-1])
     return ema
 
 def calculate_rsi(closes, period=14):
@@ -166,7 +155,7 @@ def calculate_bollinger(closes, period=20, mult=2.0):
     slice_c = closes[-period:]
     sma = sum(slice_c) / period
     std_dev = (sum((x - sma) ** 2 for x in slice_c) / period) ** 0.5
-    return round(sma + mult * std_dev, 5), round(sma - mult * std_dev, 5), round(sma, 5)
+    return round(sma + mult * std_dev, 4), round(sma - mult * std_dev, 4), round(sma, 4)
 
 def calculate_stochastic(highs, lows, closes, period=14):
     l_low = min(lows[-period:])
@@ -189,15 +178,12 @@ def analyze_strict_confluence(opens, highs, lows, closes):
     call_filters = 0
     put_filters = 0
 
-    # Filter 1: EMA Trend Alignment
     if c_close > ema20 and ema20 > ema50: call_filters += 1
     elif c_close < ema20 and ema20 < ema50: put_filters += 1
 
-    # Filter 2: RSI Overbought/Oversold Reversal
     if rsi <= 35: call_filters += 1.5
     elif rsi >= 65: put_filters += 1.5
 
-    # Filter 3: Bollinger Band Touch/Breakout
     bb_status = "MIDDLE ZONE"
     if c_close <= bb_lower or c_low <= bb_lower:
         call_filters += 1.5
@@ -206,11 +192,9 @@ def analyze_strict_confluence(opens, highs, lows, closes):
         put_filters += 1.5
         bb_status = "OVERBOUGHT (UPPER BAND)"
 
-    # Filter 4: Stochastic Reversal
     if stoch_k < 25: call_filters += 1
     elif stoch_k > 75: put_filters += 1
 
-    # Filter 5: Price Action Reversal Candlestick
     if lower_shade > (1.8 * body) and lower_shade > 0: call_filters += 1
     if upper_shade > (1.8 * body) and upper_shade > 0: put_filters += 1
 
@@ -231,51 +215,48 @@ def home():
 
 @app.route('/api/signals', methods=['GET'])
 def get_signals():
-    symbol = request.args.get('symbol', 'EURUSD_otc')
+    symbol = request.args.get('symbol', 'BTCUSDT')
     required_count = int(request.args.get('count', 5))
     
     try:
-        opens, highs, lows, closes = fetch_quotex_klines(symbol)
+        opens, highs, lows, closes = fetch_klines_safe(symbol)
         analysis = analyze_strict_confluence(opens, highs, lows, closes)
         
         signals = []
         scanned_minute = 1
         
-        # Scan upcoming 45 minutes and ONLY pick high confluence setups (Skip weak ones)
         while len(signals) < required_count and scanned_minute <= 45:
             call_s = analysis['call_score']
             put_s = analysis['put_score']
             
-            # Strict Rule: Must pass at least 4.5 out of 6 indicator filters
-            if call_s >= 4.5:
+            if call_s >= 4.0:
                 signals.append({
                     "time": f"In +{scanned_minute} min candle",
                     "direction": "CALL (UP 🟩)",
                     "confidence": f"{min(98, int(80 + call_s * 3.5))}%",
                     "confluence": f"{round(call_s, 1)}/6 Strict Indicators Passed"
                 })
-                scanned_minute += 3  # Gap for next setup
-            elif put_s >= 4.5:
+                scanned_minute += 3
+            elif put_s >= 4.0:
                 signals.append({
                     "time": f"In +{scanned_minute} min candle",
                     "direction": "PUT (DOWN 🟥)",
                     "confidence": f"{min(98, int(80 + put_s * 3.5))}%",
                     "confluence": f"{round(put_s, 1)}/6 Strict Indicators Passed"
                 })
-                scanned_minute += 3  # Gap for next setup
+                scanned_minute += 3
             else:
-                # Weak candle setup - SKIP THIS MINUTE!
                 scanned_minute += 1
 
         return jsonify({
             "status": "success",
-            "symbol": symbol.upper(),
+            "symbol": symbol,
             "analysis": analysis,
             "signals": signals
         })
 
     except Exception as e:
-        return jsonify({"status": "error", "message": f"Quotex Data Stream Error: {str(e)}"}), 500
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
