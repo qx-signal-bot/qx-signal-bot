@@ -74,11 +74,16 @@ HTML_PAGE = """
             <input type="checkbox" id="autoRefresh" onchange="toggleAutoRefresh()" style="width:auto; margin:0;">
         </div>
 
+        <label>Confluence threshold (indicators needed out of 6): <span id="thresholdVal">4.0</span></label>
+        <input type="range" id="thresholdSlider" min="1.5" max="6" step="0.5" value="4"
+               oninput="onThresholdChange()" style="width:100%; margin-bottom:6px;">
+        <div class="status-line" style="margin-top:-2px;">Lower = more signals, weaker agreement between indicators. Higher = fewer signals, stronger agreement.</div>
+
         <button onclick="getSignal()" id="manualBtn">⚡ READ CURRENT CONFLUENCE</button>
         <div class="status-line" id="nextRefreshLine"></div>
 
         <div class="track-record">
-            <h3>Honest track record (this browser, this asset only)</h3>
+            <h3>Honest track record — this asset, at threshold <span id="trThresholdLabel">4.0</span> only</h3>
             <div class="tr-stat-grid">
                 <div class="tr-stat"><div class="num tr-neutral" id="trTotal">0</div><div class="lbl">Resolved</div></div>
                 <div class="tr-stat"><div class="num tr-win" id="trWins">0</div><div class="lbl">Correct</div></div>
@@ -106,7 +111,24 @@ HTML_PAGE = """
 
     <script>
         let refreshTimer = null;
-        let pendingSignal = null; // {direction, close, symbol, time}
+        let pendingSignal = null; // {direction, close, symbol, time, threshold}
+
+        function currentThreshold() {
+            return parseFloat(document.getElementById('thresholdSlider').value);
+        }
+
+        function decideDirection(callScore, putScore, threshold) {
+            if (callScore >= threshold) return 'CALL';
+            if (putScore >= threshold) return 'PUT';
+            return 'NONE';
+        }
+
+        function onThresholdChange() {
+            const t = currentThreshold().toFixed(1);
+            document.getElementById('thresholdVal').textContent = t;
+            document.getElementById('trThresholdLabel').textContent = t;
+            renderTrackRecord(document.getElementById('symbol').value);
+        }
 
         function storageKey(symbol) { return `qx_track_${symbol}`; }
 
@@ -137,7 +159,10 @@ HTML_PAGE = """
         }
 
         function renderTrackRecord(symbol) {
-            const history = loadHistory(symbol).filter(h => h.resolved);
+            const threshold = currentThreshold();
+            // Only compare readings taken at the SAME threshold — mixing
+            // thresholds would make the win rate meaningless.
+            const history = loadHistory(symbol).filter(h => h.resolved && h.threshold === threshold);
             const total = history.length;
             const wins = history.filter(h => h.won).length;
             document.getElementById('trTotal').textContent = total;
@@ -172,15 +197,17 @@ HTML_PAGE = """
                 direction: pendingSignal.direction,
                 call_score: pendingSignal.call_score,
                 put_score: pendingSignal.put_score,
+                threshold: pendingSignal.threshold,
                 resolved: true,
                 won: won,
             });
-            saveHistory(symbol, history.slice(-200));
+            saveHistory(symbol, history.slice(-500));
             pendingSignal = null;
         }
 
         async function getSignal() {
             const symbol = document.getElementById('symbol').value;
+            const threshold = currentThreshold();
             const resDiv = document.getElementById('results');
             const statsDiv = document.getElementById('statsBox');
 
@@ -198,26 +225,32 @@ HTML_PAGE = """
                                          `<b>EMA Trend:</b> ${ans.ema_trend} | <b>RSI(14):</b> ${ans.rsi}<br>` +
                                          `<b>Stoch K:</b> ${ans.stoch} | <b>BB Zone:</b> ${ans.bb_status}`;
 
-                    const s = data.signal;
-                    const colorClass = s.direction === "CALL" ? "CALL" : (s.direction === "PUT" ? "PUT" : "NONE");
-                    const textClass = s.direction === "CALL" ? "CALL-text" : (s.direction === "PUT" ? "PUT-text" : "");
+                    // Direction is decided HERE, client-side, from the raw scores
+                    // and whatever threshold the slider is set to right now.
+                    const callScore = data.signal.call_score;
+                    const putScore = data.signal.put_score;
+                    const direction = decideDirection(callScore, putScore, threshold);
+
+                    const colorClass = direction === "CALL" ? "CALL" : (direction === "PUT" ? "PUT" : "NONE");
+                    const textClass = direction === "CALL" ? "CALL-text" : (direction === "PUT" ? "PUT-text" : "");
                     const now = new Date();
                     const timeLabel = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
                     resDiv.innerHTML = `
                         <div class="sig-box ${colorClass}">
-                            <span class="${textClass}">${s.direction === "NONE" ? "No confluence reached" : s.direction}</span>
-                            <small style="color:#64748b;"> &middot; read at ${timeLabel}</small><br>
-                            <small style="color:#cbd5e1;">Confluence score — CALL: ${s.call_score}/6, PUT: ${s.put_score}/6</small>
+                            <span class="${textClass}">${direction === "NONE" ? "No confluence reached" : direction}</span>
+                            <small style="color:#64748b;"> &middot; read at ${timeLabel} &middot; threshold ${threshold.toFixed(1)}</small><br>
+                            <small style="color:#cbd5e1;">Confluence score — CALL: ${callScore}/6, PUT: ${putScore}/6</small>
                         </div>`;
 
                     // Queue this reading to be resolved on the NEXT real fetch.
                     pendingSignal = {
                         symbol: symbol,
-                        direction: s.direction,
+                        direction: direction,
                         close: data.last_close,
-                        call_score: s.call_score,
-                        put_score: s.put_score,
+                        call_score: callScore,
+                        put_score: putScore,
+                        threshold: threshold,
                         timeLabel: timeLabel,
                     };
 
@@ -419,20 +452,4 @@ def get_signals():
             "analysis": analysis,
             "signal": {
                 "direction": direction,
-                "call_score": analysis['call_score'],
-                "put_score": analysis['put_score'],
-            },
-        })
-
-    except ValueError as e:
-        return jsonify({"status": "error", "message": str(e)}), 400
-    except requests.RequestException:
-        return jsonify({"status": "error", "message": "Could not reach Kraken API."}), 502
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
-            
+                "call_score": analysis['
